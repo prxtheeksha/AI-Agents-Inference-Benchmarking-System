@@ -27,12 +27,27 @@ class ListLogHandler(logging.Handler):
         self.records.append(self.format(record))
 
 
-def run_single_question_crewai(question: str, groq_api_key: Optional[str] = None) -> Dict[str, Any]:
+def run_single_question_crewai(
+    question: str,
+    groq_api_key: Optional[str] = None,
+    on_event: Optional[Callable[[str, str], None]] = None,
+) -> Dict[str, Any]:
+    """on_event(kind, label), if given, is called synchronously as real
+    execution signals arrive (crewai's own event bus) — kind is one of
+    "start" | "tool" | "done", label is a short human-readable description.
+    Used to drive a live step-by-step UI; never changes what crewai does."""
     module = load_crewai_module(groq_api_key)
     from crewai import Crew, Process
     from crewai.events import crewai_event_bus
     from crewai.events.types.tool_usage_events import ToolUsageFinishedEvent
     from crewai.events.types.llm_events import LLMCallCompletedEvent
+
+    def _emit(kind: str, label: str):
+        if on_event is not None:
+            try:
+                on_event(kind, label)
+            except Exception:
+                pass  # a UI callback must never break the real run
 
     # crewai 1.15.x routes tool calls through its "native tool calling" path,
     # which does NOT invoke the classic step_callback — so SQL/tool capture
@@ -50,6 +65,7 @@ def run_single_question_crewai(question: str, groq_api_key: Optional[str] = None
                 args = event.tool_args
                 query = args.get("query") if isinstance(args, dict) else None
                 trace["sql_queries"].append(str(query) if query else str(args))
+            _emit("tool", event.tool_name)
         except Exception:
             pass  # instrumentation must never break the real run
 
@@ -71,9 +87,11 @@ def run_single_question_crewai(question: str, groq_api_key: Optional[str] = None
 
     result: Dict[str, Any] = {"framework": "CrewAI", "question": question, "status": "running"}
     start = time.time()
+    _emit("start", "Agent receives the question")
     try:
         output = crew.kickoff(inputs={"question": question})
         elapsed = time.time() - start
+        _emit("done", "Final answer")
         answer_text = str(output)
         numerical = module.extract_numerical_value(answer_text)
         result.update({
@@ -100,26 +118,50 @@ def run_single_question_crewai(question: str, groq_api_key: Optional[str] = None
     return result
 
 
-def run_single_question_langgraph(question: str, groq_api_key: Optional[str] = None) -> Dict[str, Any]:
+def run_single_question_langgraph(
+    question: str,
+    groq_api_key: Optional[str] = None,
+    on_event: Optional[Callable[[str, str], None]] = None,
+) -> Dict[str, Any]:
+    """on_event(kind, label), if given, is called synchronously as each real
+    node finishes in the compiled LangGraph stream — kind is one of
+    "start" | "assistant" | "tool" | "done". Used to drive a live step-by-step
+    UI; never changes what the graph does."""
     module = load_langgraph_module(groq_api_key)
+
+    def _emit(kind: str, label: str):
+        if on_event is not None:
+            try:
+                on_event(kind, label)
+            except Exception:
+                pass
 
     result: Dict[str, Any] = {"framework": "LangGraph", "question": question, "status": "running"}
     start = time.time()
     events: List[dict] = []
     assistant_calls = 0
     sql_queries: List[str] = []
+    _emit("start", "START")
     try:
         for event in module.graph.stream({"messages": [("user", question)]}):
             events.append(event)
             if "assistant" in event:
                 assistant_calls += 1
                 msg = event["assistant"]["messages"]
-                for tc in (getattr(msg, "tool_calls", None) or []):
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                for tc in tool_calls:
                     if tc.get("name") == "execute_sql_tool":
                         q = (tc.get("args") or {}).get("query")
                         if q:
                             sql_queries.append(q)
+                if tool_calls:
+                    _emit("assistant", f"Assistant: calling {tool_calls[0].get('name', 'a tool')}")
+                else:
+                    _emit("assistant", "Assistant: final answer")
+            if "tools" in event:
+                _emit("tool", "Tools node executed")
         elapsed = time.time() - start
+        _emit("done", "END")
 
         final_content = ""
         if events and "assistant" in events[-1]:

@@ -4,36 +4,138 @@ AI Agents Inference Benchmarking System — Streamlit dashboard.
 Run from the "Data Analysis with SQL Queries" folder with:
     streamlit run app/streamlit_app.py
 
-This file only renders the UI. All benchmarking logic lives in the real
-project files (the CrewAI/LangGraph scripts, utils/metrics_collector.py)
-and in app/{framework_loader,runner,config_validate,metrics_loader}.py,
-which call those real files rather than reimplementing them.
+Three tabs, one per project objective:
+  1. Standardized Pipeline — a landing view: the pipeline shape and what's
+     held identical between the two frameworks.
+  2. Live Execution — watch, step by step, how CrewAI (one looping agent)
+     and LangGraph (an explicit assistant/tools graph) actually run a
+     question, in real time, from real execution events.
+  3. Run Your Own Question — type any question, get it answered by both
+     frameworks, and see accuracy, consistency, latency, and LLM calls.
+All benchmarking logic lives in the real project files (the CrewAI/LangGraph
+scripts, utils/metrics_collector.py) and in app/{framework_loader,runner,
+config_validate}.py, which call those real files rather than reimplementing
+them.
 """
 import os
 import sys
-import time
+import importlib.util
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).parent.parent))  # project root on sys.path for `app.*` imports
-load_dotenv(Path(__file__).parent.parent / ".env")  # Streamlit doesn't auto-load .env like the original scripts do
+sys.path.insert(0, str(Path(__file__).parent.parent))
+load_dotenv(Path(__file__).parent.parent / ".env")
 
-from app import config_validate, known_questions, metrics_loader, runner
-from app.framework_loader import dataset_status, DB_PATH, QUESTIONS_PATH, EXPECTED_RESULTS_PATH, RESULTS_DIR
+from app import config_validate, known_questions, runner
+from app.framework_loader import dataset_status, DB_PATH, QUESTIONS_PATH, EXPECTED_RESULTS_PATH
 
-st.set_page_config(
-    page_title="AI Agents Inference Benchmarking System",
-    page_icon="📊",
-    layout="wide",
-)
+st.set_page_config(page_title="CrewAI vs LangGraph", page_icon="◆", layout="wide")
+
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
+
+if st.session_state.dark_mode:
+    _p = dict(
+        accent="#6FA8E8", accent_soft="#16314F", text_main="#E7EFFA", text_sub="#9BB0C9",
+        border_c="#28415F", good="#52C98A", bad="#E8746F",
+        page_bg="linear-gradient(160deg, #0B1626 0%, #101F36 50%, #0B1A2E 100%)",
+        glass_bg="rgba(19,35,59,0.55)", glass_bg2="rgba(19,35,59,0.4)", glass_border="rgba(255,255,255,0.08)",
+        shadow="0 8px 28px rgba(0,0,0,0.35)",
+    )
+else:
+    _p = dict(
+        accent="#4A90D9", accent_soft="#EAF4FC", text_main="#17293D", text_sub="#5A7184",
+        border_c="#D8E8F6", good="#2E9E6B", bad="#D9534F",
+        page_bg="linear-gradient(160deg, #F3F8FD 0%, #EAF4FC 45%, #F7FBFE 100%)",
+        glass_bg="rgba(255,255,255,0.55)", glass_bg2="rgba(255,255,255,0.4)", glass_border="rgba(255,255,255,0.65)",
+        shadow="0 8px 28px rgba(74,144,217,0.12)",
+    )
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root {{
+  --accent: {_p['accent']}; --accent-soft: {_p['accent_soft']}; --text-main: {_p['text_main']};
+  --text-sub: {_p['text_sub']}; --border-c: {_p['border_c']}; --good: {_p['good']}; --bad: {_p['bad']};
+  --glass: {_p['glass_bg']}; --glass2: {_p['glass_bg2']}; --gborder: {_p['glass_border']}; --shadow: {_p['shadow']};
+}}
+html, body, [class*="css"] {{font-family: 'Inter', sans-serif !important;}}
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"], [data-testid="stBottomBlockContainer"] {{
+  background: {_p['page_bg']} !important;
+}}
+.block-container {{padding-top: 3.2rem; padding-bottom: 3rem; max-width: 1400px; padding-left: 2.2rem; padding-right: 2.2rem;}}
+[data-testid="stVerticalBlock"] {{gap: 0.6rem;}}
+.card, .result-card, .verdict-banner {{width: 100%;}}
+h1, h2, h3, p, span, label, .stMarkdown, [data-testid="stCaptionContainer"], [data-testid="stMetricLabel"], [data-testid="stMetricValue"] {{color: var(--text-main) !important;}}
+.eyebrow {{color: var(--accent) !important; font-size: 12.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 2px;}}
+h1 {{font-weight: 800 !important; letter-spacing: -0.02em;}}
+.app-sub {{color: var(--text-sub) !important; font-size: 15.5px; margin-top: -4px; margin-bottom: 1.2rem;}}
+.section-head {{font-size: 20px; font-weight: 700; color: var(--text-main) !important; margin: 10px 0 10px; display:flex; align-items:center; gap:8px;}}
+.section-head .dot {{width:8px; height:8px; border-radius:50%; background: var(--accent); display:inline-block;}}
+.card, .result-card, .verdict-banner {{
+  background: var(--glass) !important; border: 1px solid var(--gborder); border-radius: 16px;
+  padding: 20px 22px; margin: 12px 0; box-shadow: var(--shadow);
+  backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%);
+}}
+.fw-label {{font-size: 14px; font-weight: 700; color: var(--accent) !important; letter-spacing: .02em; margin-bottom: 10px; display:flex; align-items:center; gap:8px;}}
+.flow-row {{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom: 8px;}}
+.flow-tools {{display:flex; gap:10px; margin: 12px 0 0 64px; flex-wrap:wrap;}}
+.node {{padding:9px 13px; border-radius:10px; background: var(--glass2) !important; border:1.5px solid var(--gborder);
+       font-size:12.5px; font-weight:600; color: var(--text-sub) !important; text-align:center; transition: all .25s;
+       backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);}}
+.node.active {{border-color: var(--accent); background: var(--accent-soft) !important; color: var(--text-main) !important; box-shadow: 0 0 0 3px {_p['accent_soft']};}}
+.node.done {{color: var(--text-main) !important; border-color: var(--good);}}
+.agent-node {{padding:13px 18px; border-radius:14px; background: var(--glass2) !important; border:2px solid var(--gborder);
+             font-size:13.5px; font-weight:700; color: var(--text-sub) !important; text-align:center;
+             backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);}}
+.agent-node.active {{border-color: var(--accent); background: var(--accent-soft) !important; color: var(--text-main) !important;}}
+.agent-node.done {{border-color: var(--good); color: var(--text-main) !important;}}
+.node-sub {{font-size:10.5px; font-weight:400; color: var(--text-sub) !important; display:block; margin-top:2px;}}
+.node-count {{font-size:10.5px; margin-left:3px; color: var(--accent) !important; font-weight:700;}}
+.flow-arrow {{color: var(--border-c); font-size:17px;}}
+.flow-arrow-loop {{color: var(--accent) !important; font-size:16px; font-weight:800;}}
+.flow-caption {{font-size:11.5px; color: var(--text-sub) !important; margin-top: 8px;}}
+.timeline {{margin-top: 14px;}}
+.tl-row {{display:flex; align-items:center; gap:10px; padding:7px 0; font-size: 13px; color: var(--text-sub) !important;
+          border-bottom: 1px solid var(--gborder);}}
+.tl-row:last-child {{border-bottom: none;}}
+.tl-row.latest {{color: var(--text-main) !important; font-weight: 600;}}
+.tl-num {{width:20px; height:20px; border-radius:50%; background: var(--glass2); border:1px solid var(--gborder);
+          display:flex; align-items:center; justify-content:center; font-size:10.5px; font-weight:700;
+          color: var(--text-sub); flex-shrink:0;}}
+.tl-row.latest .tl-num {{background: var(--accent); color:#fff; border-color: var(--accent);}}
+.metric-row {{display:flex; gap: 22px; margin: 10px 0 12px;}}
+.metric-box {{flex:1;}}
+.metric-box .v {{font-size: 21px; font-weight: 800; color: var(--text-main) !important;}}
+.metric-box .l {{font-size: 11.5px; color: var(--text-sub) !important;}}
+.verdict-good {{color: var(--good) !important; font-weight: 700;}}
+.verdict-bad {{color: var(--bad) !important; font-weight: 700;}}
+.verdict-muted {{color: var(--text-sub) !important;}}
+.shared-chip {{display:inline-flex; align-items:center; gap:7px; padding:9px 16px; margin:4px 8px 4px 0;
+               border-radius: 22px; background: var(--glass) !important; border:1px solid var(--gborder);
+               font-size:13.5px; font-weight:600; color: var(--text-main) !important;
+               backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);}}
+.shared-chip .tick {{color: var(--good) !important; font-weight:800;}}
+.stTextInput input, .stTextArea textarea {{
+  background-color: var(--glass) !important; color: var(--text-main) !important; border-color: var(--gborder) !important;
+}}
+.stTextInput input::placeholder, .stTextArea textarea::placeholder {{color: var(--text-sub) !important; opacity: 1 !important;}}
+.stButton button {{background: var(--glass) !important; color: var(--text-main) !important; border-color: var(--gborder) !important;
+                   border-radius: 10px !important; backdrop-filter: blur(10px);}}
+.stButton button[kind="primary"] {{background: var(--accent) !important; color: #FFFFFF !important; border-color: var(--accent) !important;}}
+[data-testid="stExpander"] {{background: var(--glass) !important; border-color: var(--gborder) !important; border-radius: 14px; box-shadow: var(--shadow);}}
+[data-baseweb="tab-list"] {{background-color: transparent !important; gap: 4px;}}
+[data-baseweb="tab"] {{background: var(--glass) !important; border-radius: 10px 10px 0 0 !important; color: var(--text-sub) !important;}}
+[aria-selected="true"][data-baseweb="tab"] {{color: var(--accent) !important; font-weight:700 !important;}}
+code {{background-color: var(--accent-soft) !important; color: var(--text-main) !important;}}
+hr {{border-color: var(--border-c) !important;}}
+</style>
+""", unsafe_allow_html=True)
 
 
-# --------------------------------------------------------------------------
-# Credentials: env vars / st.secrets only. Never hardcoded, never displayed.
-# --------------------------------------------------------------------------
 def get_groq_key() -> str:
     key = os.environ.get("GROQ_API_KEY", "")
     if not key:
@@ -44,354 +146,413 @@ def get_groq_key() -> str:
     return key
 
 
-def ds_status():
-    return dataset_status()
+title_col, toggle_col = st.columns([6, 1])
+with title_col:
+    st.markdown('<div class="eyebrow">Agent orchestration benchmark</div>', unsafe_allow_html=True)
+    st.title("CrewAI vs LangGraph")
+with toggle_col:
+    st.markdown("<div style='height:34px'></div>", unsafe_allow_html=True)
+    st.toggle("Dark", key="dark_mode")
+st.markdown('<div class="app-sub">A standardized, live, and measured comparison of two agent frameworks on SQL data-analysis tasks.</div>', unsafe_allow_html=True)
 
-
-# --------------------------------------------------------------------------
-# Sidebar
-# --------------------------------------------------------------------------
-with st.sidebar:
-    st.title("AI Agents Benchmarking")
-    st.caption("CrewAI vs LangGraph — SQL data-analysis tasks")
-
-    st.markdown("### API key")
+status = dataset_status()
+with st.expander("Settings", expanded=not (status["db_exists"] and bool(get_groq_key()))):
     existing_key = get_groq_key()
     if existing_key:
-        st.success("GROQ_API_KEY loaded from environment/secrets.")
+        st.caption("GROQ_API_KEY loaded.")
     else:
-        st.warning("No GROQ_API_KEY found in environment or secrets.")
-        pasted_key = st.text_input("Paste a Groq API key for this session", type="password")
+        pasted_key = st.text_input("Groq API key", type="password")
         if pasted_key:
             os.environ["GROQ_API_KEY"] = pasted_key
-            st.success("Key set for this session (not saved to disk).")
+            st.caption("Key set for this session.")
+    db_ok = "✅" if status["db_exists"] else "❌"
+    q_ok = "✅" if status["questions_exists"] else "❌"
+    st.caption(f"{db_ok} database  ·  {q_ok} question set  ·  see app/data_setup.py if either is missing")
 
-    st.markdown("### Dataset status")
-    status = ds_status()
-    st.write(("✅" if status["db_exists"] else "❌") + " `data/amazon_cleaned.db`")
-    st.write(("✅" if status["questions_exists"] else "❌") + " `data/questions.py`")
-    st.write(("✅" if status["expected_results_exists"] else "❌") + " `data/expected_results.csv`")
+groq_key = get_groq_key()
+can_run = status["db_exists"] and status["questions_exists"] and bool(groq_key)
+
+if status["questions_exists"]:
+    spec = importlib.util.spec_from_file_location("questions_only", QUESTIONS_PATH)
+    qmod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qmod)
+    sample_questions = [v["question"] for v in qmod.queries.values()]
+else:
+    sample_questions = known_questions.RECOVERED_QUESTIONS
+
+expected_df = None
+if EXPECTED_RESULTS_PATH.exists():
+    try:
+        expected_df = pd.read_csv(EXPECTED_RESULTS_PATH)
+    except Exception:
+        expected_df = None
+
+
+def get_expected(q: str):
+    if expected_df is None:
+        return None
+    match = expected_df[expected_df["question"].str.strip().str.lower() == q.strip().lower()]
+    return match.iloc[0]["answer"] if not match.empty else None
+
+
+def missing_reqs():
+    missing = []
     if not status["db_exists"]:
-        st.caption(
-            "Live execution (Tabs 1 & 2) needs these files. See **app/data_setup.py** — "
-            "it builds them from a CSV you supply. Saved-results mode (Tab 3) works now."
-        )
+        missing.append("database")
+    if not status["questions_exists"]:
+        missing.append("question set")
+    if not groq_key:
+        missing.append("API key")
+    return missing
 
-    st.markdown("### Mode")
-    live_possible = status["db_exists"] and status["questions_exists"] and bool(get_groq_key())
-    st.write("🟢 Live mode available" if live_possible else "🟡 Saved-results mode only")
-
-    n_saved = len(metrics_loader.discover_metrics_files())
-    st.caption(f"{n_saved} saved benchmark result file(s) found in results/.")
-
-
-st.title("AI Agents Inference Benchmarking System")
-st.caption("A comparative evaluation of CrewAI and LangGraph for SQL data-analysis tasks.")
 
 tab1, tab2, tab3 = st.tabs([
     "1 · Standardized Pipeline",
-    "2 · Live CrewAI vs LangGraph",
-    "3 · Metrics & Analysis",
+    "2 · Live Execution",
+    "3 · Run Your Own Question",
 ])
 
 # ==========================================================================
-# TAB 1 — Objective 1: Standardized Benchmarking Pipeline
+# TAB 1 — Standardized Pipeline (landing view)
 # ==========================================================================
 with tab1:
-    st.header("Standardized Benchmarking Pipeline")
-    st.write(
-        "Both frameworks are driven by the same `config.yaml`, the same SQLite "
-        "database, the same three tools, and the same question set — run through "
-        "two different agent orchestration layers."
-    )
-
-    st.subheader("Pipeline architecture")
-    diagram_cols = st.columns(7)
-    diagram_steps = ["Benchmark\nQuestions", "Shared\nConfiguration", "CrewAI /\nLangGraph",
-                      "Shared SQL\nTools", "Same SQLite\nDatabase", "Metrics\nCollection", "Results &\nCharts"]
-    for i, (col, step) in enumerate(zip(diagram_cols, diagram_steps)):
-        with col:
-            with st.container(border=True):
-                st.markdown(f"**{step}**")
-    st.caption("Benchmark Questions → Shared Configuration → CrewAI and LangGraph → Shared SQL Tools → Same SQLite Database → Metrics Collection → Results and Comparison Charts")
+    pipe_steps = ["Question", "Config", "CrewAI / LangGraph", "SQL Tools", "Database", "Metrics"]
+    pipe_html = '<div class="flow-row">' + '<div class="flow-arrow">→</div>'.join(
+        f'<div class="node done">{s}</div>' for s in pipe_steps
+    ) + '</div>'
+    st.markdown(f'<div class="card">{pipe_html}</div>', unsafe_allow_html=True)
 
     config = config_validate.load_config()
+    model_name = config.get("model", {}).get("name", "—")
+    temp = config.get("model", {}).get("temperature", "—")
+    iters = config.get("benchmarks", {}).get("iterations", "—")
+    nq = config.get("benchmarks", {}).get("total_questions", "—")
 
-    st.subheader("Configuration actually loaded from config.yaml")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("LLM model", config.get("model", {}).get("name", "—"))
-        st.metric("Temperature", config.get("model", {}).get("temperature", "—"))
-    with c2:
-        st.metric("Iterations", config.get("benchmarks", {}).get("iterations", "—"))
-        st.metric("Questions per iteration", config.get("benchmarks", {}).get("total_questions", "—"))
-    with c3:
-        st.metric("Max tokens", config.get("model", {}).get("max_tokens", "—"))
-        st.metric("Results directory", config.get("results", {}).get("directory", "—"))
-
-    with st.expander("Full config.yaml"):
-        st.code(Path(config_validate.CONFIG_PATH).read_text(), language="yaml")
-
-    st.markdown(f"**Database path (both scripts):** `{DB_PATH}` — "
-                + ("exists ✅" if DB_PATH.exists() else "**missing** ❌"))
-
-    prompts = config_validate.get_prompt_texts()
-    with st.expander("Shared system prompt / instructions (as actually defined in each script)"):
-        pcol1, pcol2 = st.columns(2)
-        with pcol1:
-            st.markdown("**CrewAI — Agent `goal`**")
-            st.text_area("crewai_goal", prompts["crewai_goal"], height=220, label_visibility="collapsed")
-        with pcol2:
-            st.markdown("**LangGraph — `query_gen_system`**")
-            st.text_area("langgraph_prompt", prompts["langgraph_system_prompt"], height=220, label_visibility="collapsed")
-
-    st.subheader("What's shared vs. what differs by design")
-    compare_df = pd.DataFrame([
-        {"Aspect": "LLM model & temperature", "Shared?": "Shared", "Detail": "Both use config['model'] via the same Groq model string and temperature."},
-        {"Aspect": "SQLite database", "Shared?": "Shared", "Detail": "Both connect to the same data/amazon_cleaned.db path."},
-        {"Aspect": "Tools", "Shared?": "Shared", "Detail": "list_tables_tool, get_schema_tool, execute_sql_tool — same LangChain SQL utilities underneath."},
-        {"Aspect": "Question set & iteration count", "Shared?": "Shared", "Detail": "Both loop over the same data/questions.py and config['benchmarks']['iterations']."},
-        {"Aspect": "Prompt wording", "Shared?": "Framework-specific", "Detail": "CrewAI expresses instructions as an Agent `goal`; LangGraph as a system prompt. Same rules, different exact text."},
-        {"Aspect": "Orchestration", "Shared?": "Framework-specific", "Detail": "CrewAI: role-based Crew/Task/Process.sequential. LangGraph: explicit StateGraph with assistant/tools nodes."},
-        {"Aspect": "Retry / error handling", "Shared?": "Framework-specific", "Detail": "LangGraph wraps tool errors explicitly (handle_tool_error); CrewAI relies on its own internal agent loop."},
-    ])
-    st.dataframe(compare_df, hide_index=True, use_container_width=True)
-
-    st.subheader("Configuration validation")
-    checks = config_validate.run_validation(config)
-    overall = config_validate.overall_status(checks)
-    banner = {"pass": st.success, "warning": st.warning, "fail": st.error}[overall]
-    banner({
-        "pass": "All checks passed — the pipeline is standardized.",
-        "warning": "Some aspects could not be fully verified as equivalent — see warnings below. The pipeline is standardized in its core configuration, but not claimed to be identical in every respect.",
-        "fail": "Standardization could not be established.",
-    }[overall])
-
-    icon = {"pass": "✅", "warning": "⚠️", "fail": "❌"}
-    for check in checks:
-        st.markdown(f"{icon[check.status]} **{check.name}**")
-        st.caption(check.detail)
-
-    st.subheader("Run the real benchmark")
-    status = ds_status()
-    groq_key = get_groq_key()
-
-    if "benchmark_running" not in st.session_state:
-        st.session_state.benchmark_running = False
-
-    run_col1, run_col2 = st.columns([2, 1])
-    with run_col1:
-        framework_choice = st.radio("Framework(s) to run", ["CrewAI", "LangGraph", "Both"], horizontal=True)
-    with run_col2:
-        st.caption(f"{config.get('benchmarks', {}).get('iterations', '?')} iteration(s) × "
-                   f"{config.get('benchmarks', {}).get('total_questions', '?')} questions")
-
-    can_run = status["db_exists"] and status["questions_exists"] and bool(groq_key)
-    if not can_run:
-        reasons = []
-        if not status["db_exists"]:
-            reasons.append("`data/amazon_cleaned.db` is missing")
-        if not status["questions_exists"]:
-            reasons.append("`data/questions.py` is missing")
-        if not groq_key:
-            reasons.append("no GROQ_API_KEY is set")
-        st.error("Cannot run live benchmark: " + "; ".join(reasons) + ". See the sidebar for setup steps.")
-
-    start_disabled = (not can_run) or st.session_state.benchmark_running
-    if st.button("▶ Start Benchmark", disabled=start_disabled, type="primary"):
-        st.session_state.benchmark_running = True
-        frameworks_to_run = ["CrewAI", "LangGraph"] if framework_choice == "Both" else [framework_choice]
-        for fw in frameworks_to_run:
-            with st.status(f"Running real {fw} benchmark ({config['benchmarks']['iterations']} iteration(s))...", expanded=True) as s:
-                outcome = runner.run_full_benchmark(fw, groq_key)
-                if outcome["status"] == "success":
-                    s.update(label=f"{fw} benchmark completed in {outcome['elapsed_s']:.1f}s", state="complete")
-                else:
-                    s.update(label=f"{fw} benchmark failed: {outcome.get('error')}", state="error")
-                if outcome.get("log"):
-                    st.code("\n".join(outcome["log"][-50:]))
-        st.session_state.benchmark_running = False
-        st.success("Done. Open Tab 3 to see the new results alongside past runs.")
-
-    if st.session_state.benchmark_running:
-        st.info("A benchmark run is in progress — please wait for it to finish.")
+    chips = [
+        f"Same model · {model_name}",
+        f"Same temperature · {temp}",
+        "Same database",
+        "Same SQL tools",
+        f"Same question set · {nq} questions",
+        f"Same iterations · {iters}",
+    ]
+    chip_html = "".join(f'<span class="shared-chip"><span class="tick">✓</span>{c}</span>' for c in chips)
+    st.markdown(f'<div class="card">{chip_html}</div>', unsafe_allow_html=True)
 
 # ==========================================================================
-# TAB 2 — Objective 2: Live CrewAI vs LangGraph comparison
+# TAB 2 — Live Execution (the illustration)
 # ==========================================================================
 with tab2:
-    st.header("Live CrewAI vs LangGraph Comparison")
+    st.markdown('<div class="section-head"><span class="dot"></span>Watch it execute</div>', unsafe_allow_html=True)
+    st.caption("Pick a question — both frameworks run it live, and every real step is drawn as it happens.")
 
-    status = ds_status()
-    groq_key = get_groq_key()
+    if "illustrate_q" not in st.session_state:
+        st.session_state.illustrate_q = sample_questions[0]
 
-    if status["questions_exists"]:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("questions_only", QUESTIONS_PATH)
-        qmod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(qmod)
-        question_options = [v["question"] for v in qmod.queries.values()]
-        source_note = "Loaded from the real data/questions.py."
-    else:
-        question_options = known_questions.RECOVERED_QUESTIONS
-        source_note = known_questions.SOURCE_NOTE
-
-    st.caption(source_note)
-    selected_question = st.selectbox("Choose a benchmark question", question_options)
-    custom_question = st.text_input("...or enter your own SQL-analysis question (optional)")
-    question_to_run = custom_question.strip() if custom_question.strip() else selected_question
-
-    expected_answer = None
-    if EXPECTED_RESULTS_PATH.exists() and not custom_question.strip():
-        try:
-            exp_df = pd.read_csv(EXPECTED_RESULTS_PATH)
-            match = exp_df[exp_df["question"] == selected_question]
-            if not match.empty:
-                expected_answer = match.iloc[0]["answer"]
-        except Exception:
-            expected_answer = None
-
-    can_run = status["db_exists"] and status["questions_exists"] and bool(groq_key)
+    pick_col, run_illu_col = st.columns([4, 1])
+    with pick_col:
+        st.session_state.illustrate_q = st.selectbox(
+            "Pick a question", sample_questions,
+            index=sample_questions.index(st.session_state.illustrate_q) if st.session_state.illustrate_q in sample_questions else 0,
+            label_visibility="collapsed",
+        )
+    with run_illu_col:
+        illu_clicked = st.button("▶ Run illustration", disabled=not can_run, type="primary", use_container_width=True)
     if not can_run:
-        reasons = []
-        if not status["db_exists"]:
-            reasons.append("`data/amazon_cleaned.db` is missing")
-        if not status["questions_exists"]:
-            reasons.append("`data/questions.py` is missing")
-        if not groq_key:
-            reasons.append("no GROQ_API_KEY is set")
-        st.error("Cannot run live comparison: " + "; ".join(reasons) + ".")
+        st.caption(f"Can't run yet — missing: {', '.join(missing_reqs())}. See Settings above.")
 
-    if "tab2_running" not in st.session_state:
-        st.session_state.tab2_running = False
-    if "tab2_results" not in st.session_state:
-        st.session_state.tab2_results = {}
+    def render_crew_diagram(container, state):
+        final = state.get("final", False)
+        agent_cls = "agent-node done" if final else ("agent-node active" if state.get("started") else "agent-node")
+        ans_cls = "node done" if final else "node"
+        tool_html = ""
+        for key, label in [("list_tables_tool", "List tables"), ("get_schema_tool", "Get schema"), ("execute_sql_tool", "Execute SQL")]:
+            cls = "node done" if key in state["done"] else ("node active" if key == state.get("active") else "node")
+            tool_html += f'<div class="{cls}">{label}</div>'
+        tl_html = '<div class="timeline">' + "".join(
+            f'<div class="tl-row{" latest" if i == len(state["log"]) - 1 else ""}"><span class="tl-num">{i+1}</span>{line}</div>'
+            for i, line in enumerate(state["log"])
+        ) + '</div>'
+        html = f"""
+        <div class="flow-row">
+          <div class="node done">Question</div><div class="flow-arrow">→</div>
+          <div class="{agent_cls}">Agent<span class="node-sub">internal ReAct loop</span></div><div class="flow-arrow">→</div>
+          <div class="{ans_cls}">Answer</div>
+        </div>
+        <div class="flow-tools">{tool_html}</div>
+        {tl_html}
+        """
+        container.markdown(html, unsafe_allow_html=True)
 
-    if st.button("▶ Run CrewAI vs LangGraph on this question", disabled=(not can_run) or st.session_state.tab2_running, type="primary"):
-        st.session_state.tab2_running = True
-        st.session_state.tab2_results = {"question": question_to_run}
+    def render_lang_diagram(container, state):
+        counts = state["counts"]
+        active = state.get("active")
+        final = state.get("final", False)
+        start_cls = "node done" if counts["assistant"] > 0 else "node"
+        a_cls = "node active" if active == "assistant" else ("node done" if counts["assistant"] > 0 else "node")
+        t_cls = "node active" if active == "tools" else ("node done" if counts["tools"] > 0 else "node")
+        end_cls = "node done" if final else "node"
+        tl_html = '<div class="timeline">' + "".join(
+            f'<div class="tl-row{" latest" if i == len(state["log"]) - 1 else ""}"><span class="tl-num">{i+1}</span>{line}</div>'
+            for i, line in enumerate(state["log"])
+        ) + '</div>'
+        html = f"""
+        <div class="flow-row">
+          <div class="{start_cls}">START</div><div class="flow-arrow">→</div>
+          <div class="{a_cls}">Assistant<span class="node-count">×{counts['assistant']}</span></div>
+          <div class="flow-arrow-loop">⇄</div>
+          <div class="{t_cls}">Tools<span class="node-count">×{counts['tools']}</span></div>
+          <div class="flow-arrow">→</div><div class="{end_cls}">END</div>
+        </div>
+        {tl_html}
+        """
+        container.markdown(html, unsafe_allow_html=True)
 
-        progress = st.progress(0, text="Running CrewAI...")
-        try:
-            st.session_state.tab2_results["CrewAI"] = runner.run_single_question_crewai(question_to_run, groq_key)
-        except Exception as e:
-            st.session_state.tab2_results["CrewAI"] = {"status": "error", "error": str(e)}
-        progress.progress(50, text="Running LangGraph...")
-        try:
-            st.session_state.tab2_results["LangGraph"] = runner.run_single_question_langgraph(question_to_run, groq_key)
-        except Exception as e:
-            st.session_state.tab2_results["LangGraph"] = {"status": "error", "error": str(e)}
-        progress.progress(100, text="Done")
-        st.session_state.tab2_running = False
+    CREW_LOG_LABELS = {
+        "start": "Agent receives the question",
+        "list_tables_tool": "Calls <code>list_tables_tool</code> — discovers the table",
+        "get_schema_tool": "Calls <code>get_schema_tool</code> — reads columns & sample rows",
+        "execute_sql_tool": "Calls <code>execute_sql_tool</code> — runs the generated SQL",
+        "done": "Returns the final answer",
+    }
 
-    results = st.session_state.get("tab2_results", {})
-    if results.get("question"):
-        st.markdown(f"**Question:** {results['question']}")
-        if expected_answer is not None:
-            st.caption(f"Expected answer (from data/expected_results.csv): {expected_answer}")
+    def make_crew_tracker(container):
+        state = {"started": False, "active": None, "done": set(), "final": False, "log": []}
+        render_crew_diagram(container, state)
 
-        col_a, col_b = st.columns(2)
-        for col, fw in [(col_a, "CrewAI"), (col_b, "LangGraph")]:
+        def on_event(kind, label):
+            if kind == "start":
+                state["started"] = True
+                state["log"].append(CREW_LOG_LABELS["start"])
+            elif kind == "tool":
+                state["active"] = label
+                state["done"] = state["done"] | {label}
+                state["log"].append(CREW_LOG_LABELS.get(label, f"Calls <code>{label}</code>"))
+            elif kind == "done":
+                state["final"] = True
+                state["active"] = None
+                state["log"].append(CREW_LOG_LABELS["done"])
+            render_crew_diagram(container, state)
+        return on_event
+
+    def make_lang_tracker(container):
+        state = {"counts": {"assistant": 0, "tools": 0}, "active": None, "final": False, "log": []}
+        render_lang_diagram(container, state)
+
+        def on_event(kind, label):
+            if kind == "start":
+                state["log"].append("Graph starts at <code>START</code>")
+            elif kind == "assistant":
+                state["counts"]["assistant"] += 1
+                state["active"] = "assistant"
+                state["log"].append(f"Assistant node fires (#{state['counts']['assistant']}) — {label.replace('Assistant: ', '')}")
+            elif kind == "tool":
+                state["counts"]["tools"] += 1
+                state["active"] = "tools"
+                state["log"].append(f"Tools node fires (#{state['counts']['tools']}) — executes the requested tool")
+            elif kind == "done":
+                state["final"] = True
+                state["active"] = None
+                state["log"].append("Graph reaches <code>END</code> — final answer")
+            render_lang_diagram(container, state)
+        return on_event
+
+    if illu_clicked and can_run:
+        q = st.session_state.illustrate_q
+        st.markdown(f"**Question:** {q}")
+        exec_col1, exec_col2 = st.columns(2)
+        with exec_col1:
+            st.markdown('<div class="fw-label">● CrewAI — agent loop</div>', unsafe_allow_html=True)
+            crew_panel = st.empty()
+        with exec_col2:
+            st.markdown('<div class="fw-label">● LangGraph — state graph</div>', unsafe_allow_html=True)
+            lang_panel = st.empty()
+
+        crew_on_event = make_crew_tracker(crew_panel)
+        lang_on_event = make_lang_tracker(lang_panel)
+        crew_result = runner.run_single_question_crewai(q, groq_key, on_event=crew_on_event)
+        lang_result = runner.run_single_question_langgraph(q, groq_key, on_event=lang_on_event)
+
+        illu_expected = get_expected(q)
+
+        def illu_tick(numerical_answer):
+            if illu_expected is None or numerical_answer in (None, "Error retrieving numeric answer"):
+                return ""
+            try:
+                correct = float(numerical_answer) == float(illu_expected)
+            except (ValueError, TypeError):
+                return ""
+            return ' <span class="verdict-good">✓</span>' if correct else ' <span class="verdict-bad">✗</span>'
+
+        res_col1, res_col2 = st.columns(2)
+        for col, r in [(res_col1, crew_result), (res_col2, lang_result)]:
             with col:
-                st.subheader(fw)
-                r = results.get(fw)
-                if not r:
-                    st.info("Not run yet.")
+                if r.get("status") != "success":
+                    st.markdown(f'<div class="result-card">Run failed: {r.get("error", "unknown error")}</div>', unsafe_allow_html=True)
                     continue
-                if r["status"] == "error":
-                    st.error(f"Execution failed: {r.get('error')}")
-                    continue
-                st.metric("Elapsed time", f"{r['elapsed_s']:.2f}s")
-                st.metric("LLM calls", r.get("llm_call_count", "Unavailable"))
-                st.caption(r.get("llm_call_count_basis", ""))
-                st.markdown("**Answer:**")
-                st.write(r.get("raw_answer", "")[:1500])
-                st.markdown(f"**Extracted numerical answer:** `{r.get('numerical_answer')}`")
-
-                sql_queries = r.get("sql_queries") or []
-                if sql_queries:
-                    st.markdown("**Generated SQL (captured from execution trace):**")
-                    for q in sql_queries:
-                        st.code(q, language="sql")
-                else:
-                    st.caption("No SQL captured in the execution trace for this run.")
-
-                if expected_answer is not None and r.get("numerical_answer") not in (None, "Error retrieving numeric answer"):
-                    try:
-                        correct = float(r["numerical_answer"]) == float(expected_answer)
-                        st.markdown(("✅ **Correct**" if correct else "❌ **Incorrect**") + " vs. expected answer")
-                    except (ValueError, TypeError):
-                        st.caption("Not verifiable — expected answer isn't numeric.")
-                else:
-                    st.caption("Not verifiable — no expected answer available for this question.")
+                html = f"""
+                <div class="result-card">
+                  <div class="metric-row">
+                    <div class="metric-box"><div class="v">{r['elapsed_s']:.1f}s</div><div class="l">elapsed time</div></div>
+                    <div class="metric-box"><div class="v">{r.get('llm_call_count', '—')}</div><div class="l">LLM calls</div></div>
+                  </div>
+                  <div style="color:var(--text-sub); font-size:13px; margin-bottom:4px">Final answer:</div>
+                  <div style="font-size:15px; color:var(--text-main)">{r.get('raw_answer', '')[:400]}</div>
+                  <div style="color:var(--text-sub); font-size:13px; margin-top:8px">Extracted value: <code>{r.get('numerical_answer')}</code>{illu_tick(r.get('numerical_answer'))}</div>
+                </div>
+                """
+                st.markdown(html, unsafe_allow_html=True)
+                sqls = r.get("sql_queries") or []
+                if sqls:
+                    st.code(sqls[-1], language="sql")
 
 # ==========================================================================
-# TAB 3 — Objective 3: Performance Metrics and Analysis
+# TAB 3 — Run Your Own Question (evaluation)
 # ==========================================================================
 with tab3:
-    st.header("Performance Metrics and Analysis")
-    st.caption(f"Loaded from every metrics_*.json in {RESULTS_DIR} — {len(metrics_loader.discover_metrics_files())} file(s) found.")
+    st.markdown('<div class="section-head"><span class="dot"></span>Run your own question</div>', unsafe_allow_html=True)
+    st.caption("Type any question about the sales data — both frameworks answer it, scored on accuracy, consistency, latency, and LLM calls.")
 
-    df = metrics_loader.load_all_runs()
-    if df.empty:
-        st.warning("No saved benchmark results found in results/.")
-    else:
-        frameworks_available = sorted(df["framework"].unique())
-        chosen = st.multiselect("Framework filter", frameworks_available, default=frameworks_available)
-        filtered = df[df["framework"].isin(chosen)] if chosen else df
+    if "question_box" not in st.session_state:
+        st.session_state.question_box = ""
 
-        summary = metrics_loader.summarize(filtered)
-
-        st.subheader("Summary")
-        cols = st.columns(len(summary)) if len(summary) else [st]
-        for col, (_, row) in zip(cols, summary.iterrows()):
-            with col:
-                st.markdown(f"**{row['framework']}**")
-                st.metric("Avg accuracy", f"{row['avg_accuracy_pct']:.1f}%" if row["avg_accuracy_pct"] is not None else "Unavailable")
-                st.metric("Avg latency", f"{row['avg_latency_s']:.2f}s" if row["avg_latency_s"] is not None else "Unavailable")
-                st.metric("Median latency", f"{row['median_latency_s']:.2f}s" if row["median_latency_s"] is not None else "Unavailable")
-                st.metric("Runs recorded", int(row["runs_recorded"]))
-
-        st.markdown("##### Consistency (kept separate, not conflated)")
-        cons_col1, cons_col2 = st.columns(2)
-        with cons_col1:
-            st.markdown("**Accuracy consistency across repeated runs** (σ of match_percentage)")
-            for _, row in summary.iterrows():
-                val = f"{row['accuracy_stdev_pct']:.2f} pts" if row["accuracy_stdev_pct"] is not None else "Unavailable (need ≥2 runs)"
-                st.write(f"- {row['framework']}: {val}")
-        with cons_col2:
-            st.markdown("**Latency variability** (σ of iteration latency, seconds)")
-            for _, row in summary.iterrows():
-                val = f"{row['latency_stdev_s']:.2f}s" if row["latency_stdev_s"] is not None else "Unavailable (need ≥2 runs)"
-                st.write(f"- {row['framework']}: {val}")
-
-        st.caption(
-            "⚠️ The saved field historically labeled 'api_calls' is a **tasks-completed-per-iteration** "
-            "counter (MetricsCollector.increment_api_calls() is called once per question, not once per "
-            "underlying LLM request) — it always equals the question count and is NOT a true LLM API "
-            "request count. Shown below as 'tasks_completed_per_iteration' to avoid overstating precision. "
-            "A true per-question LLM call count is only measurable for **new** live runs in Tab 2, "
-            "which instrument it directly."
+    pick_col, _ = st.columns([4, 1])
+    with pick_col:
+        picked = st.selectbox(
+            "Or pick one of the benchmark questions", ["— pick a benchmark question —"] + sample_questions,
+            label_visibility="visible",
         )
+        if picked != "— pick a benchmark question —" and picked != st.session_state.question_box:
+            st.session_state.question_box = picked
+            st.rerun()
 
-        st.subheader("How accuracy is computed")
-        st.markdown(
-            "- Each run extracts the first number (`\\d+(\\.\\d+)?`) from the agent's text answer via "
-            "`extract_numerical_value()` in `utils/helper_functions.py`.\n"
-            "- `compare_answers()` checks this extracted value against `data/expected_results.csv` with "
-            "**exact equality** (no tolerance) and reports the percentage of exact matches as `match_percentage`.\n"
-            "- This is strict by design (inherited from the original project) — a correct answer formatted "
-            "slightly differently than expected (e.g. rounding) would count as incorrect."
+    in_col, btn_col = st.columns([5, 1])
+    with in_col:
+        question = st.text_input(
+            "Question", value=st.session_state.question_box,
+            placeholder="e.g. What is the maximum discount percentage?",
+            label_visibility="collapsed",
         )
+    with btn_col:
+        run_clicked = st.button("Run ▶", disabled=not can_run, type="primary", use_container_width=True)
 
-        st.subheader("Raw results")
-        st.dataframe(filtered, use_container_width=True)
-        st.download_button(
-            "Download filtered results as CSV",
-            filtered.to_csv(index=False).encode("utf-8"),
-            file_name="filtered_benchmark_results.csv",
-            mime="text/csv",
-        )
+    check_consistency = st.checkbox(
+        "Also check consistency (runs each framework twice — 2 extra calls, uses more of your rate limit)",
+        value=False,
+    )
 
-        st.subheader("Interpretation")
-        st.markdown(metrics_loader.interpretation_text(summary))
+    if not can_run:
+        st.caption(f"Can't run yet — missing: {', '.join(missing_reqs())}. See Settings above.")
+
+    if run_clicked and can_run:
+        st.session_state.question_box = question
+        q = question.strip() if question.strip() else sample_questions[0]
+        expected = get_expected(q)
+
+        spinner_text = "Running both frameworks twice each (checking consistency)..." if check_consistency else "Running both frameworks..."
+        with st.spinner(spinner_text):
+            run1_crew = runner.run_single_question_crewai(q, groq_key)
+            run1_lang = runner.run_single_question_langgraph(q, groq_key)
+            if check_consistency:
+                run2_crew = runner.run_single_question_crewai(q, groq_key)
+                run2_lang = runner.run_single_question_langgraph(q, groq_key)
+            else:
+                run2_crew = run2_lang = None
+
+        def verdict(numerical_answer, expected_val):
+            if expected_val is None or numerical_answer in (None, "Error retrieving numeric answer"):
+                return None
+            try:
+                return float(numerical_answer) == float(expected_val)
+            except (ValueError, TypeError):
+                return None
+
+        def consistency(r1, r2):
+            if r2 is None or r1.get("status") != "success" or r2.get("status") != "success":
+                return None, None
+            a1, a2 = r1.get("numerical_answer"), r2.get("numerical_answer")
+            try:
+                same = float(a1) == float(a2)
+            except (ValueError, TypeError):
+                same = a1 == a2
+            return same, abs(r1["elapsed_s"] - r2["elapsed_s"])
+
+        st.markdown(f"**Question:** {q}")
+
+        run_rows = []
+        for label, r1, r2 in [("CrewAI", run1_crew, run2_crew), ("LangGraph", run1_lang, run2_lang)]:
+            st.markdown(f'<div class="fw-label">● {label}</div>', unsafe_allow_html=True)
+            if r1.get("status") != "success":
+                st.markdown(f'<div class="result-card">Run failed: {r1.get("error", "unknown error")}</div>', unsafe_allow_html=True)
+                run_rows.append({"Framework": label, "Answer": "—", "Correct": "—", "Latency (s)": None, "LLM calls": None, "Consistency": "failed"})
+                continue
+            v = verdict(r1.get("numerical_answer"), expected)
+            same, spread = consistency(r1, r2)
+            tick_html = (' <span class="verdict-good">✓</span>' if v is True else
+                         ' <span class="verdict-bad">✗</span>' if v is False else '')
+            v_html = ('<span class="verdict-good">✓ correct</span>' if v is True else
+                      '<span class="verdict-bad">✗ incorrect</span>' if v is False else
+                      '<span class="verdict-muted">not verifiable</span>')
+            if not check_consistency:
+                c_html = '<span class="verdict-muted">not checked this run — enable the checkbox above</span>'
+                c_raw = "not checked"
+            else:
+                c_html = ('<span class="verdict-good">✓ stable across 2 runs</span>' if same is True else
+                          '<span class="verdict-bad">✗ answer changed between runs</span>' if same is False else
+                          '<span class="verdict-muted">unavailable</span>')
+                c_raw = "stable" if same is True else ("changed" if same is False else "unavailable")
+            avg_calls = None
+            calls_label = "LLM calls"
+            if r2 is not None and r1.get("llm_call_count") not in (None, "Unavailable") and r2.get("llm_call_count") not in (None, "Unavailable"):
+                try:
+                    avg_calls = round((r1["llm_call_count"] + r2["llm_call_count"]) / 2, 1)
+                    calls_label = "LLM calls (avg of 2)"
+                except TypeError:
+                    avg_calls = r1.get("llm_call_count")
+            calls_val = avg_calls if avg_calls is not None else r1.get("llm_call_count")
+            sqls = r1.get("sql_queries") or []
+            spread_html = f'<div class="metric-box"><div class="v">{spread:.1f}s</div><div class="l">latency spread (2 runs)</div></div>' if spread is not None else ""
+            html = f"""
+            <div class="result-card">
+              <div class="metric-row">
+                <div class="metric-box"><div class="v">{r1['elapsed_s']:.1f}s</div><div class="l">latency</div></div>
+                <div class="metric-box"><div class="v">{calls_val if calls_val is not None else '—'}</div><div class="l">{calls_label}</div></div>
+                {spread_html}
+              </div>
+              <div style="margin-bottom:8px">Accuracy vs. ground truth: {v_html}</div>
+              <div style="margin-bottom:8px">Consistency: {c_html}</div>
+              <div style="color:var(--text-sub); font-size:13px">Answer: <code>{r1.get('numerical_answer')}</code>{tick_html}</div>
+            </div>
+            """
+            st.markdown(html, unsafe_allow_html=True)
+            if sqls:
+                st.code(sqls[-1], language="sql")
+            run_rows.append({
+                "Framework": label, "Answer": r1.get("numerical_answer"),
+                "Correct": "yes" if v is True else ("no" if v is False else "not verifiable"),
+                "Latency (s)": round(r1["elapsed_s"], 2), "LLM calls": calls_val, "Consistency": c_raw,
+            })
+
+        results_df = pd.DataFrame(run_rows)
+        if len(results_df) == 2 and results_df["Latency (s)"].notna().all():
+            st.markdown('<div class="section-head"><span class="dot"></span>This run, compared</div>', unsafe_allow_html=True)
+            chart_c1, chart_c2 = st.columns(2)
+            chart_color = "#6FA8E8" if st.session_state.dark_mode else "#4A90D9"
+            with chart_c1:
+                st.caption("Latency (s)")
+                st.bar_chart(results_df.set_index("Framework")[["Latency (s)"]], color=chart_color)
+            with chart_c2:
+                st.caption("LLM calls")
+                st.bar_chart(results_df.set_index("Framework")[["LLM calls"]], color=chart_color)
+
+            faster = results_df.loc[results_df["Latency (s)"].idxmin(), "Framework"]
+            fewer_calls = results_df.loc[results_df["LLM calls"].idxmin(), "Framework"] if results_df["LLM calls"].notna().all() else None
+            both_correct = (results_df["Correct"] == "yes").all()
+            insight_bits = [f"**{faster}** was faster on this question."]
+            if fewer_calls:
+                insight_bits.append(f"**{fewer_calls}** used fewer LLM calls.")
+            insight_bits.append("Both frameworks answered correctly." if both_correct else "Not both frameworks answered correctly — check the cards above.")
+            st.markdown(" ".join(insight_bits))
+
+            st.markdown("##### Raw result")
+            st.dataframe(results_df, hide_index=True, use_container_width=True)
